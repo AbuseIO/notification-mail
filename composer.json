@@ -23,7 +23,6 @@
     },
     "require": {
         "php": ">=5.5.9",
-        "wpb/string-blade-compiler": "3.0.*",
         "abuseio/notification-common": "1.1.* || dev-master"
     },
     "autoload": {
