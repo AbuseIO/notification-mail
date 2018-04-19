@@ -52,7 +52,7 @@ class Mail extends Notification
 
                 foreach ($tickets as $ticket) {
                     $token['ip']     = $ticket->ash_token_ip;
-                    $token['domain'] = $ticket->ash_topen_domain;
+                    $token['domain'] = $ticket->ash_token_domain;
                     $ashUrl          = config('main.ash.url') . 'collect/' . $ticket->id . '/';
 
                     $this->addIodefObject($ticket, $token[$notificationType], $ashUrl);
