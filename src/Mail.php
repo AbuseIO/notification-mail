@@ -117,13 +117,13 @@ class Mail extends Notification
                     $plainmail = config("{$this->configBase}.templates.plain_mail");
 
                     // render the default templates
-                    if(view()->exists(['template' => $htmlmail])) {
+                    if(!empty($htmlmail)) {
                         $htmlmail  = view(['template' => $htmlmail], $replacements)->render();
                     } else {
                         Log::warning("Incorrect template, it does not exist");
                     }
 
-                    if(view()->exists(['template' => $plainmail])) {
+                    if(!empty($plainmail)) {
                         $plainmail = view(['template' => $plainmail], $replacements)->render();
                     } else {
                         Log::warning("Incorrect template, it does not exist");
