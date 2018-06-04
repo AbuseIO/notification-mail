@@ -42,6 +42,7 @@ class Mail extends Notification
      */
     public function send($notifications)
     {
+        $anonymize_domain = env('GDPR_ANONYMIZE_DOMAIN', 'example.com');
         foreach ($notifications as $customerReference => $notificationTypes) {
 
             $mails    = [];
@@ -235,8 +236,12 @@ class Mail extends Notification
 
                     $mailer = Swift_Mailer::newInstance($transport);
 
-                    if (!$mailer->send($message)) {
-                        return $this->failed("Error while sending message to {$recipient}");
+                    // only really send if the email address isn't anonymized
+                    $regexp = '/@'.$anonymize_domain.'$/';
+                    if (preg_match($regexp, $recipient) !== 1) {
+                        if (!$mailer->send($message)) {
+                            return $this->failed("Error while sending message to {$recipient}");
+                        }
                     }
                 }
             }
