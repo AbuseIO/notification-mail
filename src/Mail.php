@@ -95,7 +95,7 @@ class Mail extends Notification
                 if (!empty($boxes)) {
                     
                     // create a new message
-                    $message = Swift_Message::newInstance();
+                    $message = new Swift_Message;
 
                     // create the src url for the active brand logo
                     if (!empty($accounts[$recipient]))
@@ -179,7 +179,7 @@ class Mail extends Notification
                         is_file(Config::get('mail.smime.certificate')) &&
                         is_file(Config::get('mail.smime.key'))
                     ) {
-                        $smimeSigner = Swift_Signers_SMimeSigner::newInstance();
+                        $smimeSigner = new Swift_Signers_SMimeSigner;
                         $smimeSigner->setSignCertificate(
                             Config::get('mail.smime.certificate'),
                             Config::get('mail.smime.key')
@@ -223,10 +223,10 @@ class Mail extends Notification
                     }
 
                     $message->attach(
-                        Swift_Attachment::newInstance(gzencode($XmlAttachmentData), 'iodef.xml.gz', 'application/gzip')
+                        new Swift_Attachment(gzencode($XmlAttachmentData), 'iodef.xml.gz', 'application/gzip')
                     );
 
-                    $transport = Swift_SmtpTransport::newInstance();
+                    $transport = new Swift_SmtpTransport;
 
                     $transport->setHost(config('mail.host'));
                     $transport->setPort(config('mail.port'));
@@ -234,7 +234,7 @@ class Mail extends Notification
                     $transport->setPassword(config('mail.password'));
                     $transport->setEncryption(config('mail.encryption'));
 
-                    $mailer = Swift_Mailer::newInstance($transport);
+                    $mailer = new Swift_Mailer($transport);
 
                     // only really send if the email address isn't anonymized
                     $regexp = '/@'.$anonymize_domain.'$/';
