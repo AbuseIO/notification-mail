@@ -13,6 +13,7 @@ use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Crypto\SMimeSigner;
 use Illuminate\Support\Facades\Blade;
 use URL;
+use Log;
 
 /**
  * Class Mail
@@ -214,28 +215,66 @@ class Mail extends Notification
                     // Attach gzipped IODEF XML
                     $email->attach(gzencode($XmlAttachmentData), 'iodef.xml.gz', 'application/gzip');
 
-                    // Prepare Symfony Mailer transport from config
-                    $host = config('mail.host');
-                    $port = config('mail.port');
-                    $username = config('mail.username');
-                    $password = config('mail.password');
-                    $encryption = config('mail.encryption'); // 'tls', 'ssl', or null
+                    // Prepare Symfony Mailer transport from Laravel mail config
+                    $defaultMailer = Config::get('mail.default', 'smtp');
+                    $mailerCfg = Config::get("mail.mailers.$defaultMailer", []);
 
-                    $scheme = ($encryption === 'ssl') ? 'smtps' : 'smtp';
-                    $auth = '';
-                    if (!empty($username)) {
-                        $auth = rawurlencode($username);
-                        if (!empty($password)) {
-                            $auth .= ':' . rawurlencode($password);
+                    // If using an aggregate transport, choose the first concrete mailer
+                    $transportName = $mailerCfg['transport'] ?? 'smtp';
+                    if (in_array($transportName, ['failover', 'roundrobin'])) {
+                        $first = $mailerCfg['mailers'][0] ?? 'smtp';
+                        $mailerCfg = Config::get("mail.mailers.$first", []);
+                        $transportName = $mailerCfg['transport'] ?? 'smtp';
+                    }
+
+                    $dsn = null;
+                    if (!empty($mailerCfg['url'])) {
+                        $dsn = $mailerCfg['url'];
+                    } else {
+                        switch ($transportName) {
+                            case 'smtp':
+                                $scheme = $mailerCfg['scheme'] ?? ((($mailerCfg['encryption'] ?? null) === 'ssl') ? 'smtps' : 'smtp');
+                                $host = $mailerCfg['host'] ?? '127.0.0.1';
+                                $port = $mailerCfg['port'] ?? 25;
+                                $auth = '';
+                                if (!empty($mailerCfg['username'])) {
+                                    $auth = rawurlencode($mailerCfg['username']);
+                                    if (!empty($mailerCfg['password'])) {
+                                        $auth .= ':' . rawurlencode($mailerCfg['password']);
+                                    }
+                                    $auth .= '@';
+                                }
+                                $dsn = sprintf('%s://%s%s:%s', $scheme, $auth, $host, $port);
+                                if (!empty($mailerCfg['encryption']) && $mailerCfg['encryption'] === 'tls') {
+                                    $dsn .= '?encryption=tls';
+                                }
+                                break;
+                            case 'sendmail':
+                                $path = $mailerCfg['path'] ?? '/usr/sbin/sendmail -bs -i';
+                                $dsn = 'sendmail://default?command=' . rawurlencode($path);
+                                break;
+                            case 'log':
+                            case 'array':
+                                // Use Symfony's Null transport equivalent
+                                $dsn = 'null://null';
+                                break;
+                            default:
+                                // Fallback to SMTP with minimal sane defaults
+                                $scheme = 'smtp';
+                                $host = $mailerCfg['host'] ?? '127.0.0.1';
+                                $port = $mailerCfg['port'] ?? 25;
+                                $dsn = sprintf('%s://%s:%s', $scheme, $host, $port);
+                                break;
                         }
-                        $auth .= '@';
-                    }
-                    $dsn = sprintf('%s://%s%s:%s', $scheme, $auth, $host, $port);
-                    if ($encryption === 'tls') {
-                        $dsn .= '?encryption=tls';
                     }
 
-                    $transport = Transport::fromDsn($dsn);
+                    try {
+                        $transport = Transport::fromDsn($dsn);
+                    } catch (\Throwable $e) {
+                        // As a safety net, fall back to null transport to avoid fatal DSN errors in dev
+                        Log::warning('Invalid mailer DSN ("'.$dsn.'"). Falling back to null transport: '.$e->getMessage());
+                        $transport = Transport::fromDsn('null://null');
+                    }
                     $mailer = new Mailer($transport);
 
                     // S/MIME signing if configured
@@ -301,20 +340,22 @@ class Mail extends Notification
                 'restriction' => 'private',
             ]
         );
-        $ashlink->value = $ashUrl . $token;
+        $ashlink->value = !empty($token) ? ($ashUrl . $token) : $ashUrl;
         $incident->addChild($ashlink);
 
         // Add ASH Token seperatly
-        $ashtoken = new Iodef\Elements\AdditionalData;
-        $ashtoken->setAttributes(
-            [
-                'dtype'       => 'string',
-                'meaning'     => 'ASH Token',
-                'restriction' => 'private',
-            ]
-        );
-        $ashtoken->value = $token;
-        $incident->addChild($ashtoken);
+        if (!empty($token)) {
+            $ashtoken = new Iodef\Elements\AdditionalData;
+            $ashtoken->setAttributes(
+                [
+                    'dtype'       => 'string',
+                    'meaning'     => 'ASH Token',
+                    'restriction' => 'private',
+                ]
+            );
+            $ashtoken->value = $token;
+            $incident->addChild($ashtoken);
+        }
 
         // Add AbuseDesk Status seperatly
         $ticketStatus = new Iodef\Elements\AdditionalData;
@@ -381,7 +422,7 @@ class Mail extends Notification
             [
                 'type'     => 'ext-value',
                 'ext-type' => $ticket->class_id,
-                'severity' => $severity[$ticket->type_id],
+                'severity' => $severity[$ticket->type_id] ?? 'low',
             ]
         );
         $assessment->addChild($impact);
@@ -541,21 +582,21 @@ class Mail extends Notification
                 $historySubmitter->value = "{$note->submitter}";
                 $historyItem->addChild($historySubmitter);
 
-                $historyNote = new Iodef\Elements\AdditionalData;
-                $historyNote->setAttributes(
-                    [
-                        'meaning' => 'text',
-                    ]
-                );
-
-                if(empty(trim($note->text))) {
-                    $historyNote->value = false;
-                } else {
+                // Add note text only when present to satisfy 'value' requirement
+                if (!empty(trim($note->text))) {
+                    $historyNote = new Iodef\Elements\AdditionalData;
+                    $historyNote->setAttributes(
+                        [
+                            'dtype'    => 'string',
+                            'meaning'  => 'text',
+                        ]
+                    );
                     $historyNote->value = "{$note->text}";
+                    $historyItem->addChild($historyNote);
                 }
-                $historyItem->addChild($historyNote);
 
                 $history->addChild($historyItem);
+                $elementCounter++;
             }
 
             if($elementCounter >= 1) {
