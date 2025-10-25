@@ -6,11 +6,12 @@ use AbuseIO\Models\Account;
 use AbuseIO\Models\Brand;
 use Marknl\Iodef;
 use Config;
-use Swift_SmtpTransport;
-use Swift_Mailer;
-use Swift_Message;
-use Swift_Signers_SMimeSigner;
-use Swift_Attachment;
+use Symfony\Component\Mailer\Mailer;
+use Symfony\Component\Mailer\Transport;
+use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\Address;
+use Symfony\Component\Mime\Crypto\SMimeSigner;
+use Illuminate\Support\Facades\Blade;
 use URL;
 
 /**
@@ -94,8 +95,8 @@ class Mail extends Notification
 
                 if (!empty($boxes)) {
                     
-                    // create a new message
-                    $message = new Swift_Message;
+                    // create a new message (Symfony Email)
+                    $email = new Email();
 
                     // create the src url for the active brand logo
                     if (!empty($accounts[$recipient]))
@@ -117,15 +118,23 @@ class Mail extends Notification
                     $htmlmail  = config("{$this->configBase}.templates.html_mail");
                     $plainmail = config("{$this->configBase}.templates.plain_mail");
 
-                    // render the default templates
+                    // render the default templates using Blade::render on strings
                     if(!empty($htmlmail)) {
-                        $htmlmail  = view(['template' => $htmlmail], $replacements)->render();
+                        try {
+                            $htmlmail  = Blade::render($htmlmail, $replacements);
+                        } catch (\Throwable $e) {
+                            Log::warning("Incorrect template, it does not exist: " . $e->getMessage());
+                        }
                     } else {
                         Log::warning("Incorrect template, it does not exist");
                     }
 
                     if(!empty($plainmail)) {
-                        $plainmail = view(['template' => $plainmail], $replacements)->render();
+                        try {
+                            $plainmail = Blade::render($plainmail, $replacements);
+                        } catch (\Throwable $e) {
+                            Log::warning("Incorrect template, it does not exist: " . $e->getMessage());
+                        }
                     } else {
                         Log::warning("Incorrect template, it does not exist");
                     }
@@ -146,8 +155,8 @@ class Mail extends Notification
                         if ($validator->passes()) {
                             try {
                                 // only use the templates if they pass the validation
-                                $htmloutput  = view(['template' => $brand->mail_template_html], $replacements)->render();
-                                $plainoutput = view(['template' => $brand->mail_template_plain], $replacements)->render();
+                                $htmloutput  = Blade::render($brand->mail_template_html, $replacements);
+                                $plainoutput = Blade::render($brand->mail_template_plain, $replacements);
 
                                 // no errors occurred while rendering
                                 $htmlmail = $htmloutput;
@@ -171,7 +180,66 @@ class Mail extends Notification
                     );
                     $XmlAttachmentData = $iodef->outputMemory();
 
+                    // From, To, Bcc, Subject
+                    $email->from(new Address(Config::get('main.notifications.from_address'), Config::get('main.notifications.from_name')));
 
+                    if (!empty(Config::get('mail.override_address'))) {
+                        $email->to(Config::get('mail.override_address'));
+                    } else {
+                        $email->to(...explode(',', $recipient));
+                    }
+
+                    if (!empty(Config::get('main.notifications.bcc_enabled'))) {
+                        $email->bcc(Config::get('main.notifications.bcc_address'));
+                    }
+
+                    $email->priority(Email::PRIORITY_HIGHEST);
+                    $email->subject($subject);
+
+                    // Body composition
+                    if(config("{$this->configBase}.notification.prefer_html_body")) {
+                        $email->html($htmlmail);
+
+                        if(config("{$this->configBase}.notification.text_part_enabled")) {
+                            $email->text($plainmail);
+                        }
+                    } else {
+                        $email->text($plainmail);
+
+                        if(config("{$this->configBase}.notification.html_part_enabled")) {
+                            $email->html($htmlmail);
+                        }
+                    }
+
+                    // Attach gzipped IODEF XML
+                    $email->attach(gzencode($XmlAttachmentData), 'iodef.xml.gz', 'application/gzip');
+
+                    // Prepare Symfony Mailer transport from config
+                    $host = config('mail.host');
+                    $port = config('mail.port');
+                    $username = config('mail.username');
+                    $password = config('mail.password');
+                    $encryption = config('mail.encryption'); // 'tls', 'ssl', or null
+
+                    $scheme = ($encryption === 'ssl') ? 'smtps' : 'smtp';
+                    $auth = '';
+                    if (!empty($username)) {
+                        $auth = rawurlencode($username);
+                        if (!empty($password)) {
+                            $auth .= ':' . rawurlencode($password);
+                        }
+                        $auth .= '@';
+                    }
+                    $dsn = sprintf('%s://%s%s:%s', $scheme, $auth, $host, $port);
+                    if ($encryption === 'tls') {
+                        $dsn .= '?encryption=tls';
+                    }
+
+                    $transport = Transport::fromDsn($dsn);
+                    $mailer = new Mailer($transport);
+
+                    // S/MIME signing if configured
+                    $signedMessage = null;
                     if (!empty(Config::get('mail.smime.enabled')) &&
                         (Config::get('mail.smime.enabled')) === true &&
                         !empty(Config::get('mail.smime.certificate')) &&
@@ -179,72 +247,29 @@ class Mail extends Notification
                         is_file(Config::get('mail.smime.certificate')) &&
                         is_file(Config::get('mail.smime.key'))
                     ) {
-                        $smimeSigner = new Swift_Signers_SMimeSigner;
-                        $smimeSigner->setSignCertificate(
-                            Config::get('mail.smime.certificate'),
-                            Config::get('mail.smime.key')
-                        );
-                        $message->attachSigner($smimeSigner);
-                    }
-
-                    $message->setFrom(
-                        [
-                            Config::get('main.notifications.from_address') =>
-                                Config::get('main.notifications.from_name')
-                        ]
-                    );
-
-                    if (!empty(Config::get('mail.override_address'))) {
-                        $message->setTo([Config::get('mail.override_address')]);
-                    } else {
-                        $message->setTo(explode(',', $recipient));
-                    }
-
-                    if (!empty(Config::get('main.notifications.bcc_enabled'))) {
-                        $message->setBcc([(Config::get('main.notifications.bcc_address'))]);
-                    }
-
-                    $message->setPriority(1);
-
-                    $message->setSubject($subject);
-
-                    if(config("{$this->configBase}.notification.prefer_html_body")) {
-                        $message->setBody($htmlmail, 'text/html');
-
-                        if(config("{$this->configBase}.notification.text_part_enabled")) {
-                            $message->addPart($plainmail, 'text/plain');
-                        }
-                    } else {
-                        $message->setBody($plainmail, 'text/plain');
-
-                        if(config("{$this->configBase}.notification.html_part_enabled")) {
-                            $message->addPart($htmlmail, 'text/html');
+                        try {
+                            $smimeSigner = new SMimeSigner(
+                                Config::get('mail.smime.certificate'),
+                                Config::get('mail.smime.key')
+                            );
+                            $signedMessage = $smimeSigner->sign($email);
+                        } catch (\Throwable $e) {
+                            Log::warning('S/MIME signing failed: ' . $e->getMessage());
                         }
                     }
-
-                    $message->attach(
-                        new Swift_Attachment(gzencode($XmlAttachmentData), 'iodef.xml.gz', 'application/gzip')
-                    );
-
-                    $transport = new Swift_SmtpTransport;
-
-                    $transport->setHost(config('mail.host'));
-                    $transport->setPort(config('mail.port'));
-                    $transport->setUsername(config('mail.username'));
-                    $transport->setPassword(config('mail.password'));
-                    $transport->setEncryption(config('mail.encryption'));
-
-                    $mailer = new Swift_Mailer($transport);
 
                     // only really send if the email address isn't anonymized
                     $regexp = '/@'.$anonymize_domain.'$/';
                     if (preg_match($regexp, $recipient) !== 1) {
-                        if (!$mailer->send($message)) {
-                            return $this->failed("Error while sending message to {$recipient}");
+                        try {
+                            $mailer->send($signedMessage ?: $email);
+                        } catch (\Throwable $e) {
+                            return $this->failed("Error while sending message to {$recipient}: " . $e->getMessage());
                         }
                     }
                 }
             }
+
         }
 
         return $this->success();
